@@ -38,7 +38,7 @@ var (
 	hostname        = flag.String("hostname", envOr("TSNET_HOSTNAME", "paste"), "hostname to use on your tailnet, TSNET_HOSTNAME in the environment")
 	dataDir         = flag.String("data-location", dataLocation(), "where data is stored, defaults to DATA_DIR or ~/.config/tailscale/paste")
 	tsnetLogVerbose = flag.Bool("tsnet-verbose", hasEnv("TSNET_VERBOSE"), "if set, have tsnet log verbosely to standard error")
-	useFunnel       = flag.Bool("use-funnel", hasEnv("USE_FUNNEL"), "if set, expose individual pastes to the public internet with Funnel, USE_FUNNEL in the environment")
+	httpsURL        = flag.String("https-url", "", "the base domain URL of this service")
 
 	//go:embed schema.sql
 	sqlSchema string
@@ -703,11 +703,8 @@ func main() {
 		time.Sleep(time.Second)
 	}
 
-	ctx := context.Background()
-	httpsURL, ok := lc.ExpandSNIName(ctx, *hostname)
-	if !ok {
-		log.Println(httpsURL)
-		log.Fatal("HTTPS is not enabled in the admin panel")
+	if *httpsURL == "" {
+		log.Fatal("httpsURL required but not provided")
 	}
 
 	ln, err := s.Listen("tcp", ":80")
@@ -717,7 +714,7 @@ func main() {
 
 	tmpls := template.Must(template.ParseFS(templateFiles, "tmpl/*.html"))
 
-	srv := &Server{lc, db, tmpls, httpsURL}
+	srv := &Server{lc, db, tmpls, *httpsURL}
 
 	tailnetMux := http.NewServeMux()
 	tailnetMux.Handle("/static/", http.FileServer(http.FS(staticFiles)))
@@ -728,36 +725,8 @@ func main() {
 	tailnetMux.HandleFunc("/", srv.TailnetIndex)
 	tailnetMux.HandleFunc("/help", srv.TailnetHelp)
 
-	funnelMux := http.NewServeMux()
-	funnelMux.Handle("/static/", http.FileServer(http.FS(staticFiles)))
-	funnelMux.HandleFunc("/", srv.PublicIndex)
-	funnelMux.HandleFunc("/paste/", srv.ShowPost)
-
 	log.Printf("listening on http://%s", *hostname)
-	go func() { log.Fatal(http.Serve(ln, tailnetMux)) }()
-
-	if *useFunnel {
-		log.Println("trying to listen on funnel")
-		ln, err := s.ListenFunnel("tcp", ":443")
-		if err != nil {
-			log.Fatalf("can't listen on funnel: %v", err)
-		}
-		defer ln.Close()
-
-		log.Printf("listening on https://%s", httpsURL)
-		log.Fatal(MixedCriticalityHandler{
-			Public:  funnelMux,
-			Private: tailnetMux,
-		}.Serve(ln))
-	} else {
-		ln, err := s.ListenTLS("tcp", ":443")
-		if err != nil {
-			log.Fatal(err)
-		}
-		defer ln.Close()
-		log.Printf("listening on https://%s", httpsURL)
-		log.Fatal(http.Serve(ln, tailnetMux))
-	}
+	log.Fatal(http.Serve(ln, tailnetMux))
 }
 
 type mixedCriticalityHandlerCtxKey int
